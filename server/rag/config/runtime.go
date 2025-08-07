@@ -21,6 +21,7 @@ type Runtime struct {
 		Password string `yaml:"password"`
 	} `yaml:"redis"`
 	Module      string       `yaml:"module"`
+	Embedder    string       `yaml:"embedder"`
 	VectorDB    VectorDB     `yaml:"vectordb"`
 	Datasources []Datasource `yaml:"datasources"`
 }
@@ -87,5 +88,6 @@ func (rt *Runtime) ToConfig() *Config {
 			Local: filepath.Join("server", "rag", ds.Name),
 		})
 	}
+	c.Embedder = rt.Embedder
 	return &c
 }

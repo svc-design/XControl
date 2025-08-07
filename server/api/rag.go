@@ -33,11 +33,23 @@ func initRAG() *rag.Service {
 	if err != nil {
 		return nil
 	}
-	key := os.Getenv("OPENAI_API_KEY")
 	svcCfg := cfg.ToConfig()
 	var emb embed.Embedder
-	if key != "" {
-		emb = embed.NewOpenAI("text-embedding-3-small", key)
+	switch svcCfg.Embedder {
+	case "bge":
+		if ep := os.Getenv("BGE_ENDPOINT"); ep != "" {
+			emb = embed.NewBGE(ep)
+		}
+	case "openai":
+		if key := os.Getenv("OPENAI_API_KEY"); key != "" {
+			emb = embed.NewOpenAI("text-embedding-3-small", key)
+		}
+	default:
+		if key := os.Getenv("OPENAI_API_KEY"); key != "" {
+			emb = embed.NewOpenAI("text-embedding-3-small", key)
+		} else if ep := os.Getenv("BGE_ENDPOINT"); ep != "" {
+			emb = embed.NewBGE(ep)
+		}
 	}
 	svc := rag.New(svcCfg, st, emb)
 	go svc.Sync(context.Background())
