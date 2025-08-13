@@ -3,8 +3,10 @@
 import { useState } from 'react'
 import { ChatBubble } from './ChatBubble'
 import { SourceHint } from './SourceHint'
+import { PIPELINE_VERSION } from '../lib/constants'
 
 const MAX_MESSAGES = 20
+const NEED_CITATION = true
 
 export function AskAIDialog({
   open,
@@ -20,6 +22,18 @@ export function AskAIDialog({
   const [question, setQuestion] = useState('')
   const [messages, setMessages] = useState<{ sender: 'user' | 'ai'; text: string }[]>([])
   const [sources, setSources] = useState<any[]>([])
+  const [summary, setSummary] = useState('')
+
+  function stripHtml(html: string) {
+    return html.replace(/<[^>]+>/g, '')
+  }
+
+  function summarize(existing: string, msgs: { text: string }[]) {
+    if (msgs.length === 0) return existing
+    const addition = msgs.map(m => stripHtml(m.text)).join(' ')
+    const combined = existing ? `${existing} ${addition}` : addition
+    return combined.slice(-1000)
+  }
 
   function renderMarkdown(text: string) {
     // code blocks
@@ -98,15 +112,26 @@ export function AskAIDialog({
     if (!question) return
 
     const userMessage = { sender: 'user' as const, text: renderMarkdown(question) }
+    const overflow = messages.slice(0, Math.max(0, messages.length - (MAX_MESSAGES - 1)))
+    const newSummary = summarize(summary, overflow)
     const history = [...messages.slice(-MAX_MESSAGES + 1), userMessage]
-    setMessages(prev => [...prev, userMessage])
+    setSummary(newSummary)
+    setMessages(history)
     setQuestion('')
 
     try {
+      const body = JSON.stringify({
+        question,
+        history,
+        summary: newSummary,
+        user_confidence: 1,
+        history_len: history.length,
+        need_citation: NEED_CITATION
+      })
       const res = await fetch(`${apiBase}/api/rag/query`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ question, history })
+        headers: { 'Content-Type': 'application/json', 'X-Pipeline-Version': PIPELINE_VERSION },
+        body
       })
 
       if (!res.ok) throw new Error('Request failed')
@@ -121,8 +146,8 @@ export function AskAIDialog({
         try {
           const aiRes = await fetch(`${apiBase}/api/askai`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ question, history })
+            headers: { 'Content-Type': 'application/json', 'X-Pipeline-Version': PIPELINE_VERSION },
+            body: JSON.stringify({ question, history, summary: newSummary })
           })
 
           if (aiRes.ok) {
@@ -139,10 +164,24 @@ export function AskAIDialog({
       }
 
       const aiMessage = { sender: 'ai' as const, text: renderMarkdown(answer) }
-      setMessages(prev => [...prev, aiMessage].slice(-MAX_MESSAGES))
+      setMessages(prev => {
+        const newMessages = [...prev, aiMessage]
+        const drop = newMessages.slice(0, Math.max(0, newMessages.length - MAX_MESSAGES))
+        if (drop.length) {
+          setSummary(s => summarize(s, drop))
+        }
+        return newMessages.slice(-MAX_MESSAGES)
+      })
     } catch (err) {
       const aiMessage = { sender: 'ai' as const, text: renderMarkdown('Something went wrong. Please try again later.') }
-      setMessages(prev => [...prev, aiMessage].slice(-MAX_MESSAGES))
+      setMessages(prev => {
+        const newMessages = [...prev, aiMessage]
+        const drop = newMessages.slice(0, Math.max(0, newMessages.length - MAX_MESSAGES))
+        if (drop.length) {
+          setSummary(s => summarize(s, drop))
+        }
+        return newMessages.slice(-MAX_MESSAGES)
+      })
     }
   }
 

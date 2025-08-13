@@ -1,0 +1,1 @@
+export const PIPELINE_VERSION = process.env.NEXT_PUBLIC_PIPELINE_VERSION || '1'
