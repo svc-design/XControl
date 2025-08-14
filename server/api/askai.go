@@ -33,7 +33,7 @@ func registerAskAIRoutes(r *gin.RouterGroup) {
 
 		var chunks any
 		if ragSvc != nil {
-			docs, _ := ragSvc.Query(c.Request.Context(), req.Question, 5)
+			docs, _, _ := ragSvc.Query(c.Request.Context(), req.Question, 5)
 			chunks = docs
 		}
 

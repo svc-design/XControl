@@ -30,8 +30,9 @@ func (m *mockRAGService) Upsert(ctx context.Context, rows []store.DocRow) (int, 
 	return len(rows), nil
 }
 
-func (m *mockRAGService) Query(ctx context.Context, question string, limit int) ([]rag.Document, error) {
+func (m *mockRAGService) Query(ctx context.Context, question string, limit int) ([]rag.Document, []float64, error) {
 	docs := make([]rag.Document, len(m.docs))
+	scores := make([]float64, len(m.docs))
 	for i, d := range m.docs {
 		docs[i] = rag.Document{
 			Repo:     d.Repo,
@@ -40,11 +41,13 @@ func (m *mockRAGService) Query(ctx context.Context, question string, limit int) 
 			Content:  d.Content,
 			Metadata: d.Metadata,
 		}
+		scores[i] = 0.9
 	}
 	if limit < len(docs) {
 		docs = docs[:limit]
+		scores = scores[:limit]
 	}
-	return docs, nil
+	return docs, scores, nil
 }
 
 // TestRAGUpsertAndQuery verifies that a 1024-dimensional vector can be stored
@@ -91,13 +94,21 @@ func TestRAGUpsertAndQuery(t *testing.T) {
 		t.Fatalf("expected status 200, got %d", w.Code)
 	}
 	var qresp struct {
-		Chunks []rag.Document `json:"chunks"`
+		Chunks     []rag.Document `json:"chunks"`
+		Confidence float64        `json:"confidence"`
+		TopScores  []float64      `json:"top_scores"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &qresp); err != nil {
 		t.Fatalf("unmarshal query response: %v", err)
 	}
 	if len(qresp.Chunks) != 1 || qresp.Chunks[0].Content != "hello" {
 		t.Fatalf("unexpected chunks: %+v", qresp.Chunks)
+	}
+	if qresp.Confidence != 0.9 {
+		t.Fatalf("confidence = %v", qresp.Confidence)
+	}
+	if len(qresp.TopScores) != 1 || qresp.TopScores[0] != 0.9 {
+		t.Fatalf("top scores = %v", qresp.TopScores)
 	}
 }
 

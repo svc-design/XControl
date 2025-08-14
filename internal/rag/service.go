@@ -54,13 +54,16 @@ type Document struct {
 	Metadata map[string]any `json:"metadata"`
 }
 
-func (s *Service) Query(ctx context.Context, question string, limit int) ([]Document, error) {
+// Query searches the vector store for documents related to the question. It
+// returns matched documents along with their relevance scores (sorted in
+// descending order).
+func (s *Service) Query(ctx context.Context, question string, limit int) ([]Document, []float64, error) {
 	if s == nil || s.cfg == nil {
-		return nil, nil
+		return nil, nil, nil
 	}
 	embCfg := s.cfg.ResolveEmbedding()
 	if embCfg.Endpoint == "" {
-		return nil, nil
+		return nil, nil, nil
 	}
 	var emb embed.Embedder
 	switch embCfg.Provider {
@@ -77,18 +80,18 @@ func (s *Service) Query(ctx context.Context, question string, limit int) ([]Docu
 	}
 	vecs, _, err := emb.Embed(ctx, []string{question})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if len(vecs) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	dsn := s.cfg.Global.VectorDB.DSN()
 	if dsn == "" {
-		return nil, nil
+		return nil, nil, nil
 	}
 	conn, err := pgx.Connect(ctx, dsn)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer conn.Close(ctx)
 
@@ -112,7 +115,7 @@ func (s *Service) Query(ctx context.Context, question string, limit int) ([]Docu
 	vrows, err := conn.Query(ctx, `SELECT repo,path,chunk_id,content,metadata, embedding <#> $1 AS dist FROM documents WHERE embedding IS NOT NULL ORDER BY embedding <#> $1 LIMIT $2`,
 		pgvector.NewVector(vecs[0]), cand)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	for vrows.Next() {
 		var d scored
@@ -120,7 +123,7 @@ func (s *Service) Query(ctx context.Context, question string, limit int) ([]Docu
 		var dist float64
 		if err := vrows.Scan(&d.Repo, &d.Path, &d.ChunkID, &d.Content, &metaBytes, &dist); err != nil {
 			vrows.Close()
-			return nil, err
+			return nil, nil, err
 		}
 		if len(metaBytes) > 0 {
 			_ = json.Unmarshal(metaBytes, &d.Metadata)
@@ -134,7 +137,7 @@ func (s *Service) Query(ctx context.Context, question string, limit int) ([]Docu
 	trows, err := conn.Query(ctx, `SELECT repo,path,chunk_id,content,metadata, ts_rank_cd(content_tsv, websearch_to_tsquery('zhcn_search', $1)) AS rank FROM documents WHERE content_tsv @@ websearch_to_tsquery('zhcn_search', $1) ORDER BY rank DESC LIMIT $2`,
 		question, cand)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	for trows.Next() {
 		var metaBytes []byte
@@ -143,7 +146,7 @@ func (s *Service) Query(ctx context.Context, question string, limit int) ([]Docu
 		d := scored{}
 		if err := trows.Scan(&d.Repo, &d.Path, &d.ChunkID, &d.Content, &metaBytes, &rank); err != nil {
 			trows.Close()
-			return nil, err
+			return nil, nil, err
 		}
 		if len(metaBytes) > 0 {
 			_ = json.Unmarshal(metaBytes, &d.Metadata)
@@ -191,8 +194,10 @@ func (s *Service) Query(ctx context.Context, question string, limit int) ([]Docu
 		limit = len(candidates)
 	}
 	out := make([]Document, 0, limit)
+	scores := make([]float64, 0, limit)
 	for i := 0; i < limit; i++ {
 		out = append(out, candidates[i].Document)
+		scores = append(scores, candidates[i].score)
 	}
-	return out, nil
+	return out, scores, nil
 }

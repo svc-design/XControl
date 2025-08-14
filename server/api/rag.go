@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -17,7 +18,7 @@ import (
 // service.
 type ragService interface {
 	Upsert(ctx context.Context, rows []store.DocRow) (int, error)
-	Query(ctx context.Context, question string, limit int) ([]rag.Document, error)
+	Query(ctx context.Context, question string, limit int) ([]rag.Document, []float64, error)
 }
 
 // ragSvc handles RAG document storage and retrieval.
@@ -58,20 +59,62 @@ func registerRAGRoutes(r *gin.RouterGroup) {
 	r.POST("/rag/query", func(c *gin.Context) {
 		var req struct {
 			Question string `json:"question"`
+			AB       bool   `json:"ab"`
 		}
 		if err := c.BindJSON(&req); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
 		if ragSvc == nil {
-			c.JSON(http.StatusOK, gin.H{"chunks": nil})
+			c.JSON(http.StatusOK, gin.H{"chunks": nil, "confidence": 0, "top_scores": nil})
 			return
 		}
-		docs, err := ragSvc.Query(c.Request.Context(), req.Question, 5)
+		docs, scores, err := ragSvc.Query(c.Request.Context(), req.Question, 5)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"chunks": docs})
+		confidence := 0.0
+		if len(scores) > 0 {
+			confidence = scores[0]
+		}
+		const tau1 = 0.5
+		const tau2 = 0.6
+		if req.AB && (len(scores) == 0 || confidence < tau1) {
+			if hypo, err := askFn(req.Question); err == nil {
+				slog.Info("rag query fallback", "reason", "fallback_hyde", "question", req.Question)
+				docs, scores, err = ragSvc.Query(c.Request.Context(), hypo, 5)
+				if err != nil {
+					c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+					return
+				}
+				if len(scores) > 0 {
+					confidence = scores[0]
+				} else {
+					confidence = 0
+				}
+			}
+		}
+		if req.AB && (len(scores) == 0 || confidence < tau2) {
+			note := "未检索到权威来源，请以通用知识作答并标注\"无内部来源\"。\n\n" + req.Question
+			ans, err := askFn(note)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+			slog.Info("rag query fallback", "reason", "fallback_askai", "question", req.Question)
+			c.JSON(http.StatusOK, gin.H{
+				"answer":     ans,
+				"chunks":     docs,
+				"confidence": confidence,
+				"top_scores": scores,
+			})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"chunks":     docs,
+			"confidence": confidence,
+			"top_scores": scores,
+		})
 	})
 }
