@@ -10,6 +10,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/redis/go-redis/v9"
 	"github.com/spf13/cobra"
 
@@ -103,6 +104,8 @@ var rootCmd = &cobra.Command{
 				})
 			},
 		)
+
+		r.GET("/metrics", gin.WrapH(promhttp.Handler()))
 
 		r.Run() // listen and serve on 0.0.0.0:8080
 	},
