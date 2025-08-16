@@ -130,6 +130,7 @@ type Config struct {
 	Retrieval struct {
 		Alpha      float64 `yaml:"alpha"`
 		Candidates int     `yaml:"candidates"`
+		MinResults int     `yaml:"min_results"`
 	} `yaml:"retrieval"`
 	API struct {
 		AskAI struct {
