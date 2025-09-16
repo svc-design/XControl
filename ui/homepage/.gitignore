@@ -1,18 +1,40 @@
-
-# Build output
-.next/
-out/
-
-# Dependencies
+# Node 基础
 node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
 
-# Logs
-*.log
+# 构建产物
+dist/
+build/
+out/
+.next/
+coverage/
 
-# OS junk
+# 编辑器/系统
 .DS_Store
-
-# Editor junk
-.vscode/
+Thumbs.db
 .idea/
+.vscode/
+*.swp
 
+# Yarn v4 (Berry)
+# ------------------------------------------------
+# 不提交依赖缓存，避免仓库过大
+.yarn/cache/
+
+# 可选：不提交全局 SDKs（大部分情况下不需要）
+.yarn/sdks/
+
+# 可选：不提交 Yarn 临时状态文件
+.yarn/unplugged/
+.pnp.*
+.pnp.loader.mjs
+
+# 要提交的（保持 Yarn 环境一致）
+!.yarn/releases/
+!.yarn/plugins/
+!.yarnrc.yml
+
+# 如果你想完全保留 Yarn 的离线可安装能力，可去掉下面这行注释
+# !.yarn/cache/

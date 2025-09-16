@@ -1,4 +1,6 @@
 models/
+scws/
+ui/dist/
 hf_cache/
 server/server/
 docs/init-bak-20250813.sql
