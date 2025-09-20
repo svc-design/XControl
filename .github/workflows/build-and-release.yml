@@ -154,7 +154,6 @@ jobs:
   pre-setup:
     needs:
       - release
-    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -242,21 +241,21 @@ jobs:
           REMOTE_HOST: ${{ secrets.VPS_USER }}@${{ matrix.site }}
         run: |
           set -euo pipefail
-          artifact_zip=""
-          if [[ -f "artifacts/homepage/homepage-static-export.zip" ]]; then
-            artifact_zip="artifacts/homepage/homepage-static-export.zip"
+          artifact=""
+          if [[ -f "artifacts/homepage/homepage-static-export.tar.gz" ]]; then
+            artifact="artifacts/homepage/homepage-static-export.tar.gz"
           else
-            artifact_zip=$(find artifacts/homepage -maxdepth 3 -type f -name 'homepage-static-export.zip' | head -n 1)
+            artifact=$(find artifacts/homepage -maxdepth 3 -type f -name 'homepage-static-export.tar.gz' | head -n 1)
           fi
-          if [[ -z "${artifact_zip}" ]]; then
-            echo "homepage-static-export.zip not found under artifacts/homepage" >&2
+          if [[ -z "${artifact_tar.gz}" ]]; then
+            echo "homepage-static-export.tar.gz not found under artifacts/homepage" >&2
             exit 1
           fi
 
           dest_root="artifacts/homepage/out"
           rm -rf "${dest_root}"
           mkdir -p "${dest_root}"
-          unzip -oq "${artifact_zip}" -d "${dest_root}"
+          tar -xvpf "${artifact}" -d "${dest_root}"
 
           src="${dest_root}"
           if [[ -d "${dest_root}/out" ]]; then
