@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"sync"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	pgvector "github.com/pgvector/pgvector-go"
+	"golang.org/x/sync/errgroup"
 
 	"xcontrol/internal/rag/config"
 	"xcontrol/internal/rag/embed"
@@ -52,6 +55,13 @@ type Document struct {
 	ChunkID  int            `json:"chunk_id"`
 	Content  string         `json:"content"`
 	Metadata map[string]any `json:"metadata"`
+}
+
+type scored struct {
+	Document
+	vscore float64
+	tscore float64
+	score  float64
 }
 
 func (s *Service) Query(ctx context.Context, question string, limit int) ([]Document, error) {
@@ -100,63 +110,74 @@ func (s *Service) Query(ctx context.Context, question string, limit int) ([]Docu
 	if cand <= 0 {
 		cand = 50
 	}
-
-	type scored struct {
-		Document
-		vscore float64
-		tscore float64
-		score  float64
+	minHits := s.cfg.Retrieval.MinResults
+	if minHits <= 0 {
+		minHits = 5
 	}
+
 	docsMap := map[string]*scored{}
+	var mu sync.Mutex
+	var eg errgroup.Group
 
-	vrows, err := conn.Query(ctx, `SELECT repo,path,chunk_id,content,metadata, embedding <#> $1 AS dist FROM documents WHERE embedding IS NOT NULL ORDER BY embedding <#> $1 LIMIT $2`,
-		pgvector.NewVector(vecs[0]), cand)
-	if err != nil {
-		return nil, err
-	}
-	for vrows.Next() {
-		var d scored
-		var metaBytes []byte
-		var dist float64
-		if err := vrows.Scan(&d.Repo, &d.Path, &d.ChunkID, &d.Content, &metaBytes, &dist); err != nil {
-			vrows.Close()
-			return nil, err
+	eg.Go(func() error {
+		vrows, err := conn.Query(ctx, `SELECT repo,path,chunk_id,content,metadata, embedding <#> $1 AS dist FROM documents WHERE embedding IS NOT NULL ORDER BY embedding <#> $1 LIMIT $2`,
+			pgvector.NewVector(vecs[0]), cand)
+		if err != nil {
+			return err
 		}
-		if len(metaBytes) > 0 {
-			_ = json.Unmarshal(metaBytes, &d.Metadata)
-		}
-		d.vscore = -dist
-		key := fmt.Sprintf("%s|%s|%d", d.Repo, d.Path, d.ChunkID)
-		docsMap[key] = &d
-	}
-	vrows.Close()
-
-	trows, err := conn.Query(ctx, `SELECT repo,path,chunk_id,content,metadata, ts_rank_cd(content_tsv, websearch_to_tsquery('zhcn_search', $1)) AS rank FROM documents WHERE content_tsv @@ websearch_to_tsquery('zhcn_search', $1) ORDER BY rank DESC LIMIT $2`,
-		question, cand)
-	if err != nil {
-		return nil, err
-	}
-	for trows.Next() {
-		var metaBytes []byte
-		var rank float64
-		key := ""
-		d := scored{}
-		if err := trows.Scan(&d.Repo, &d.Path, &d.ChunkID, &d.Content, &metaBytes, &rank); err != nil {
-			trows.Close()
-			return nil, err
-		}
-		if len(metaBytes) > 0 {
-			_ = json.Unmarshal(metaBytes, &d.Metadata)
-		}
-		d.tscore = rank
-		key = fmt.Sprintf("%s|%s|%d", d.Repo, d.Path, d.ChunkID)
-		if exist, ok := docsMap[key]; ok {
-			exist.tscore = d.tscore
-		} else {
+		defer vrows.Close()
+		for vrows.Next() {
+			var d scored
+			var metaBytes []byte
+			var dist float64
+			if err := vrows.Scan(&d.Repo, &d.Path, &d.ChunkID, &d.Content, &metaBytes, &dist); err != nil {
+				return err
+			}
+			if len(metaBytes) > 0 {
+				_ = json.Unmarshal(metaBytes, &d.Metadata)
+			}
+			d.vscore = -dist
+			key := fmt.Sprintf("%s|%s|%d", d.Repo, d.Path, d.ChunkID)
+			mu.Lock()
 			docsMap[key] = &d
+			mu.Unlock()
 		}
+		return nil
+	})
+
+	eg.Go(func() error {
+		trows, err := conn.Query(ctx, `SELECT repo,path,chunk_id,content,metadata, ts_rank_cd(content_tsv, websearch_to_tsquery('zhcn_search', $1)) AS rank FROM documents WHERE content_tsv @@ websearch_to_tsquery('zhcn_search', $1) ORDER BY rank DESC LIMIT $2`,
+			question, cand)
+		if err != nil {
+			return err
+		}
+		defer trows.Close()
+		for trows.Next() {
+			var metaBytes []byte
+			var rank float64
+			d := scored{}
+			if err := trows.Scan(&d.Repo, &d.Path, &d.ChunkID, &d.Content, &metaBytes, &rank); err != nil {
+				return err
+			}
+			if len(metaBytes) > 0 {
+				_ = json.Unmarshal(metaBytes, &d.Metadata)
+			}
+			d.tscore = rank
+			key := fmt.Sprintf("%s|%s|%d", d.Repo, d.Path, d.ChunkID)
+			mu.Lock()
+			if exist, ok := docsMap[key]; ok {
+				exist.tscore = d.tscore
+			} else {
+				docsMap[key] = &d
+			}
+			mu.Unlock()
+		}
+		return nil
+	})
+
+	if err := eg.Wait(); err != nil {
+		return nil, err
 	}
-	trows.Close()
 
 	candidates := make([]*scored, 0, len(docsMap))
 	for _, d := range docsMap {
@@ -168,31 +189,92 @@ func (s *Service) Query(ctx context.Context, question string, limit int) ([]Docu
 		candidates = candidates[:cand]
 	}
 
-	// optional reranking
+	// optional reranker
 	var rr rerank.Reranker
 	rCfg := s.cfg.Models.Reranker
 	if rCfg.Endpoint != "" {
 		rr = rerank.NewBGE(rCfg.Endpoint, rCfg.Token)
 	}
-	if rr != nil {
-		docs := make([]string, len(candidates))
-		for i, c := range candidates {
-			docs[i] = c.Content
+
+	toDocs := func(cands []*scored, lim int) []Document {
+		if lim > len(cands) {
+			lim = len(cands)
 		}
-		if scores, err := rr.Rerank(ctx, question, docs); err == nil && len(scores) == len(candidates) {
-			for i := range candidates {
-				candidates[i].score = float64(scores[i])
-			}
-			sort.Slice(candidates, func(i, j int) bool { return candidates[i].score > candidates[j].score })
+		out := make([]Document, 0, lim)
+		for i := 0; i < lim; i++ {
+			out = append(out, cands[i].Document)
 		}
+		return out
 	}
 
-	if limit > len(candidates) {
-		limit = len(candidates)
+	applyRerank := func(ctx context.Context, cands []*scored) []*scored {
+		if rr == nil || len(cands) < 16 {
+			return cands
+		}
+		rctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		docs := make([]string, len(cands))
+		for i, c := range cands {
+			docs[i] = c.Content
+		}
+		if scores, err := rr.Rerank(rctx, question, docs); err == nil && len(scores) == len(cands) {
+			for i := range cands {
+				cands[i].score = float64(scores[i])
+			}
+			sort.Slice(cands, func(i, j int) bool { return cands[i].score > cands[j].score })
+		}
+		return cands
 	}
-	out := make([]Document, 0, limit)
-	for i := 0; i < limit; i++ {
-		out = append(out, candidates[i].Document)
+
+	if len(candidates) < minHits {
+		resCh := make(chan []Document, 2)
+		ctx2, cancel := context.WithCancel(ctx)
+		go func() {
+			resCh <- toDocs(applyRerank(ctx2, candidates), limit)
+		}()
+		go func() {
+			hydeRes := s.hydeSearch(ctx2, emb, conn, question, cand)
+			resCh <- toDocs(applyRerank(ctx2, hydeRes), limit)
+		}()
+		docs := <-resCh
+		cancel()
+		return docs, nil
 	}
-	return out, nil
+
+	candidates = applyRerank(ctx, candidates)
+	return toDocs(candidates, limit), nil
+}
+
+func (s *Service) hydeSearch(ctx context.Context, emb embed.Embedder, conn *pgx.Conn, question string, cand int) []*scored {
+	hypo := fmt.Sprintf("Answer: %s", question)
+	vecs, _, err := emb.Embed(ctx, []string{hypo})
+	if err != nil || len(vecs) == 0 {
+		return nil
+	}
+	rows, err := conn.Query(ctx, `SELECT repo,path,chunk_id,content,metadata, embedding <#> $1 AS dist FROM documents WHERE embedding IS NOT NULL ORDER BY embedding <#> $1 LIMIT $2`,
+		pgvector.NewVector(vecs[0]), cand)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	out := make([]*scored, 0)
+	for rows.Next() {
+		var d scored
+		var metaBytes []byte
+		var dist float64
+		if err := rows.Scan(&d.Repo, &d.Path, &d.ChunkID, &d.Content, &metaBytes, &dist); err != nil {
+			return nil
+		}
+		if len(metaBytes) > 0 {
+			_ = json.Unmarshal(metaBytes, &d.Metadata)
+		}
+		d.vscore = -dist
+		d.score = d.vscore
+		out = append(out, &d)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].score > out[j].score })
+	if len(out) > cand {
+		out = out[:cand]
+	}
+	return out
 }

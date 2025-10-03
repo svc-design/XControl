@@ -17,6 +17,7 @@ require (
 	github.com/yuin/goldmark v1.7.13
 	golang.org/x/crypto v0.37.0
 	golang.org/x/net v0.39.0
+	golang.org/x/sync v0.13.0
 	gopkg.in/yaml.v3 v3.0.1
 	gorm.io/gorm v1.25.5
 )
